@@ -1,0 +1,153 @@
+library(dplyr)
+library(factoextra)
+library(ggfortify)
+library(ggplot2)
+library(readr)
+library(tidyr)
+library(tidytext)
+library(readxl)
+
+# Purpose: Run PCA on cluster analysis and provide driving features of PCA axes
+
+###############
+## Load data ##
+###############
+
+setwd("C:/Users/andre/Documents/NYU/Biobank/Brain_Gastro/post_analysis")
+# demographics
+ukb_demo <- read_csv("../../Data/df_cluster_encoded_result.csv") %>% 
+   select(eid, `31-0.0`, `21003-2.0`)
+# # cluster labels
+# ukb_cluster <- read_csv("../../Data/somatic_df_cluster_k4_1yr.csv") %>% 
+#   select(eid, kmedoids_cluster) %>% 
+#   mutate(kmedoids_cluster = as.factor(kmedoids_cluster))
+
+# load encoded cluster adata
+ukb <- read_csv("../../Data/ukb43673_somatic_cols_6mo_filtered_pos_mixed_ordinal_encoded_result.csv") %>% 
+  mutate(kmedoids_cluster = as.factor(kmedoids_cluster))
+
+# load data dictionary
+ukb_data_dict <- read_excel("../../Data/ukb_filtered_fields_revised.xlsx",
+                            sheet = "data_dict") %>% 
+  select(UDI, Path, Field)
+
+##################################################
+## Combine encoded symptoms with cluster labels ##
+##################################################
+
+# Doing this as a short-term fix due to time constraints. 
+# The correct way is to have one file that already has encoded features 
+# with cluster labels
+# ukb <- ukb_encoded %>% inner_join(ukb_cluster, by="eid")
+
+# check there are no duplicate EIDs
+paste("Rows in combined df:", nrow(ukb))
+paste("Unique EID values in df:", ukb %>% select(eid) %>% nrow)
+
+#############
+## Run PCA ##
+#############
+
+# filter to features for PCA
+ukb_pca <- ukb %>% select(-c(eid, kmeans_cluster))
+# PCA
+pca <- prcomp(ukb_pca %>% select(-kmedoids_cluster), scale. = TRUE)
+# plot PCA
+autoplot(pca, data=ukb_pca, colour='kmedoids_cluster', frame=TRUE) + 
+  labs(title = "PCA: Kmedoids (k=4)")
+
+# save PCA plot
+ggsave("../../Data/pca_kmed4.pdf")
+
+##################
+## PCA Loadings ##
+##################
+
+# scree plot
+fviz_eig(pca)
+# save screen plot
+ggsave("../../Data/scree_kmed4.pdf")
+
+# PCA loadings
+pca_loadings <- as.data.frame(get_pca_var(pca)$contrib)
+
+# add field IDs as column and field metadata 
+pca_loadings <- add_rownames(pca_loadings) %>% 
+  left_join(ukb_data_dict, by = c("rowname" = "UDI"))
+
+# manually populate Path field with NULL values
+null_values <- pca_loadings$rowname[is.na(pca_loadings %>% select(Path))]
+
+# manually checked category of fields on UKB site.
+# Example: Field 20458-0.0: https://biobank.ctsu.ox.ac.uk/showcase/field.cgi?id=20458
+manual_mapping <- data.frame(field_id = null_values, 
+                             Path_revised = c("Online follow-up > Digestive health",
+                                              "Online follow-up > Digestive health")
+                             )
+
+# add manual mapping of Path variable
+pca_loadings <- pca_loadings %>% 
+  left_join(manual_mapping, by = c("rowname" = "field_id"))
+pca_loadings$Path <- if_else(is.na(pca_loadings$Path), pca_loadings$Path_revised, pca_loadings$Path)
+pca_loadings <- pca_loadings %>% select(-c(Path_revised))
+
+# plot PCA weights for first 6 PCA dimensions (arbitrary)
+pca_sub <- pca_loadings %>% 
+  select("Dim.1", "Dim.2", "Dim.3", "Dim.4", "Dim.5", "Dim.6", Path)
+
+# group by question category
+pca_grp <- pca_sub %>% 
+  pivot_longer(cols=contains("Dim.")) %>% 
+  group_by(Path, name) %>% 
+  summarise(weights = sum(value))
+
+# plot PCA weights by variable category
+pca_grp %>% 
+  ggplot(aes(reorder(Path, weights), y=weights)) +
+  geom_bar(position="dodge", stat="identity") + 
+  geom_text(aes(label=round(weights, 0)), hjust=-0.08) + 
+  facet_wrap(~name) +
+  labs(title = "PCA Variable Weights: K Medoids (k=4)") + 
+  coord_flip() + 
+  scale_x_reordered()
+  
+# save PCA variable category weights
+ggsave("../../data/pca_var_weights_kmed4.pdf", width=10, height=7)
+
+########################
+# Cluster demographics #
+########################
+
+# mapping source:
+# https://biobank.ctsu.ox.ac.uk/showcase/field.cgi?id=31
+# https://biobank.ctsu.ox.ac.uk/showcase/field.cgi?id=21003
+
+# add age and sex variables
+ukb <- ukb %>% 
+  left_join(ukb_demo, by = "eid")
+
+mapping <- data.frame(UDI = c("31-0.0", "21003-2.0"),
+                      Field = c("% Male", "Age when Attended Assessment Centre"))
+
+ukb %>% 
+  select(eid, kmedoids_cluster, `21003-2.0`, `31-0.0`) %>% 
+  pivot_longer(cols = c(`21003-2.0`, `31-0.0`)) %>% 
+  left_join(mapping, by = c("name" = "UDI")) %>% 
+  drop_na %>% 
+  group_by(kmedoids_cluster, Field) %>% 
+  summarise(avg_value = mean(value)) %>% 
+  ggplot(aes(x=kmedoids_cluster, y=avg_value, fill = kmedoids_cluster)) +
+  geom_bar(stat="identity") + 
+  facet_wrap(~Field, scales = "free")
+
+# save demographics
+ggsave("../../data/demographics_kmed4.pdf")
+  
+# check variables in final output
+vars <- pca_loadings %>% 
+  select(rowname, Field) %>% unique() %>% 
+  print(n = 60) %>% 
+  arrange(rowname)
+
+# write variables used in PCA to csv (for checking purposes)
+write_csv(vars, "../../data/vars_kmed4.csv")
